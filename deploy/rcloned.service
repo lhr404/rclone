@@ -1,0 +1,15 @@
+[Unit]
+Description=Rclone Mount Service
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=forking
+ExecStart=/etc/init.d/rcloned start
+ExecStop=/etc/init.d/rcloned stop
+RemainAfterExit=yes
+TimeoutStartSec=5min
+
+[Install]
+WantedBy=multi-user.target
