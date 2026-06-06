@@ -1,0 +1,165 @@
+#!/bin/bash
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
+export PATH
+NAME_BIN="rclone"
+
+# ========== 配置区域 ==========
+# 格式为 "远程名称:本地挂载路径"
+MOUNTS=(
+    "od:/home/OneDrive"
+    "od1:/home/OneDrive1"
+    "gd:/home/GoogleDrive"
+)
+
+# 缓存与日志路径
+DISK_CACHE_ROOT="/var/cache/rclone"
+LOG_DIR="$HOME/.rclone"
+
+# ==============================
+
+mkdir -p ${LOG_DIR}
+
+Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Font_color_suffix="\033[0m"
+Info="${Green_font_prefix}[信息]${Font_color_suffix}"
+Error="${Red_font_prefix}[错误]${Font_color_suffix}"
+
+check_running(){
+    local NAME=$1
+    # 严格匹配进程名
+    PID="$(ps aux | grep "rclone mount" | grep "$NAME:" | grep -v grep | awk '{print $2}' | head -n1)"
+    [[ ! -z ${PID} ]] && return 0 || return 1
+}
+
+do_start(){
+    mkdir -p ${DISK_CACHE_ROOT}
+    
+    for mount_config in "${MOUNTS[@]}"; do
+        NAME="${mount_config%%:*}"
+        LOCAL="${mount_config##*:}"
+        LOG="${LOG_DIR}/rcloned_${NAME}.log"
+        CACHE_DIR="${DISK_CACHE_ROOT}/${NAME}"
+        
+        check_running "$NAME"
+        if [[ $? -eq 0 ]]; then
+            echo -e "${Info} $NAME_BIN [$NAME] 正在运行..."
+        else
+            # 清理残留
+            fusermount -zuq $LOCAL >/dev/null 2>&1
+            if grep -qs "$LOCAL" /proc/mounts; then umount -l "$LOCAL" >/dev/null 2>&1; fi
+            mkdir -p $LOCAL
+            mkdir -p ${CACHE_DIR}
+
+            # ==================================================
+            #         策略分流：OD 用老配置，GD 用防封锁配置
+            # ==================================================
+            
+            if [[ "$NAME" == "gd" ]]; then
+                # 【Google Drive 专用优化配置】
+                # 加入 --drive-upload-cutoff 1T 以解决大文件上传 429 报错
+                echo -e "${Info} 启动 [$NAME] -> $LOCAL (GD 防封锁模式: Cutoff 1T)"
+                
+                sudo /usr/bin/rclone mount $NAME: $LOCAL \
+                  --allow-other \
+                  --allow-non-empty \
+                  --uid 0 --gid 0 --umask 000 \
+                  --cache-dir ${CACHE_DIR} \
+                  --vfs-cache-mode full \
+                  --vfs-cache-prefetch-max 200M \
+                  --vfs-cache-max-age 720h \
+                  --vfs-cache-max-size 80G \
+                  --vfs-cache-min-free-space 10G \
+                  --vfs-read-chunk-size 64M \
+                  --vfs-read-chunk-size-limit 2G \
+                  --buffer-size 256M \
+                  --vfs-read-ahead 1G \
+                  --multi-thread-cutoff 32M \
+                  --multi-thread-streams 8 \
+                  --vfs-read-chunk-streams 4 \
+                  --dir-cache-time 72h \
+                  --poll-interval 30s \
+                  --attr-timeout 5m \
+                  --transfers 8 \
+                  --tpslimit 24 \
+                  --tpslimit-burst 12 \
+                  --drive-upload-cutoff 1T \
+                  --low-level-retries 200 \
+                  --no-modtime --no-checksum --vfs-fast-fingerprint \
+                  --log-file "${LOG}" > /dev/null 2>&1 &
+
+            else
+                # 【OneDrive (od/od1) 经典老配置】
+                # 保持原有的高并发配置
+                echo -e "${Info} 启动 [$NAME] -> $LOCAL (OD 经典高速模式)"
+
+                sudo /usr/bin/rclone mount $NAME: $LOCAL \
+                  --allow-other \
+                  --allow-non-empty \
+                  --uid 0 --gid 0 --umask 000 \
+                  --cache-dir ${CACHE_DIR} \
+                  --vfs-cache-mode full \
+                  --vfs-cache-prefetch-max 200M \
+                  --vfs-cache-max-age 720h \
+                  --vfs-cache-max-size 100G \
+                  --vfs-read-chunk-size 32M \
+                  --vfs-read-chunk-size-limit 2G \
+                  --buffer-size 64M \
+                  --vfs-read-ahead 128M \
+                  --dir-cache-time 72h \
+                  --poll-interval 30s \
+                  --attr-timeout 5m \
+                  --transfers 4 \
+                  --low-level-retries 200 \
+                  --no-modtime --no-checksum --vfs-fast-fingerprint \
+                  --log-file "${LOG}" > /dev/null 2>&1 &
+            fi
+            
+            # ==================================================
+
+            sleep 2s
+            check_running "$NAME"
+            if [[ $? -eq 0 ]]; then
+                echo -e "${Info} $NAME_BIN [$NAME] 启动成功 !"
+            else
+                echo -e "${Error} $NAME_BIN [$NAME] 启动失败 ! 请检查日志: ${LOG}"
+            fi
+        fi
+    done
+}
+
+do_stop(){
+    for mount_config in "${MOUNTS[@]}"; do
+        NAME="${mount_config%%:*}"
+        LOCAL="${mount_config##*:}"
+        
+        CUR_PID="$(ps aux | grep "rclone mount" | grep "$NAME:" | grep -v grep | awk '{print $2}' | head -n1)"
+        
+        if [[ ! -z ${CUR_PID} ]]; then
+            echo -e "${Info} 正在停止 $NAME (PID: ${CUR_PID})..."
+            kill -9 ${CUR_PID}
+            for i in {1..15}; do
+                if kill -0 ${CUR_PID} 2>/dev/null; then sleep 1; else break; fi
+            done
+            echo -e "${Info} $NAME_BIN [$NAME] 停止成功"
+        else
+            echo -e "${Info} $NAME_BIN [$NAME] 未运行"
+        fi
+        
+        fusermount -zuq $LOCAL >/dev/null 2>&1
+        if grep -qs "$LOCAL" /proc/mounts; then umount -l "$LOCAL" >/dev/null 2>&1; fi
+    done
+}
+
+do_restart(){
+    do_stop
+    sleep 2s
+    do_start
+}
+
+case "$1" in
+    start|stop|restart)
+    do_$1
+    ;;
+    *)
+    echo "使用方法: $0 { start | stop | restart }"
+    ;;
+esac
