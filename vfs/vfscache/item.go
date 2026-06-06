@@ -17,6 +17,7 @@ import (
 	"github.com/rclone/rclone/lib/ranges"
 	"github.com/rclone/rclone/vfs/vfscache/downloaders"
 	"github.com/rclone/rclone/vfs/vfscache/writeback"
+	"github.com/rclone/rclone/vfs/vfscommon"
 )
 
 // NB as Cache and Item are tightly linked it is necessary to have a
@@ -568,6 +569,45 @@ func (item *Item) open(o fs.Object) (err error) {
 	// Create the downloaders
 	if item.o != nil {
 		item.downloaders = downloaders.New(item, item.c.opt, item.name, item.o)
+
+		// If whole-file prefetch is enabled and this is a small file
+		// opened in cache-mode full, kick off a background download of
+		// the entire file. This avoids range-request thrashing (and the
+		// resulting high iowait / stalls) when a reader performs lots of
+		// random seeks within the file, e.g. reading pages out of a
+		// zip/cbz comic archive over the mount.
+		prefetchMax := int64(item.c.opt.CachePrefetchMax)
+		if prefetchMax > 0 && item.c.opt.CacheMode >= vfscommon.CacheModeFull &&
+			item.info.Size > 0 && item.info.Size <= prefetchMax && !item._present() {
+			size := item.info.Size
+			dls := item.downloaders
+			name := item.name
+			go func() {
+				fs.Debugf(name, "vfs cache: prefetching whole file into cache (%d bytes)", size)
+				// Download (not just EnsureDownloader) registers a
+				// waiter for the requested range, which extends the
+				// downloader's maxOffset so it keeps fetching
+				// sequentially instead of pausing once it gets ahead of
+				// the reader. Download can return before the whole range
+				// is actually present (e.g. a downloader stopped early or
+				// the waiter range got clipped), so loop over whatever is
+				// still missing until the file is fully cached. Download
+				// blocks, hence the goroutine.
+				whole := ranges.Range{Pos: 0, Size: size}
+				for try := 0; try < 1000; try++ {
+					missing := item.FindMissing(whole)
+					if missing.IsEmpty() {
+						fs.Debugf(name, "vfs cache: whole-file prefetch complete (%d bytes)", size)
+						return
+					}
+					if err := dls.Download(missing); err != nil {
+						fs.Debugf(name, "vfs cache: whole-file prefetch failed at %+v: %v", missing, err)
+						return
+					}
+				}
+				fs.Debugf(name, "vfs cache: whole-file prefetch gave up after too many retries")
+			}()
+		}
 	}
 
 	return err

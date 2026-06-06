@@ -136,6 +136,11 @@ var OptionsInfo = fs.Options{{
 	Help:    "Extra read ahead over --buffer-size when using cache-mode full",
 	Groups:  "VFS",
 }, {
+	Name:    "vfs_cache_prefetch_max",
+	Default: 0 * fs.Mebi,
+	Help:    "In cache-mode full, when a file no larger than this is opened, prefetch the whole file into the cache in the background (0 to disable)",
+	Groups:  "VFS",
+}, {
 	Name:    "vfs_used_is_size",
 	Default: false,
 	Help:    "Use the `rclone size` algorithm for Used size",
@@ -205,7 +210,8 @@ type Options struct {
 	WriteWait          fs.Duration   `config:"vfs_write_wait"`       // time to wait for in-sequence write
 	ReadWait           fs.Duration   `config:"vfs_read_wait"`        // time to wait for in-sequence read
 	WriteBack          fs.Duration   `config:"vfs_write_back"`       // time to wait before writing back dirty files
-	ReadAhead          fs.SizeSuffix `config:"vfs_read_ahead"`       // bytes to read ahead in cache mode "full"
+	ReadAhead          fs.SizeSuffix `config:"vfs_read_ahead"`           // bytes to read ahead in cache mode "full"
+	CachePrefetchMax   fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // prefetch whole file into cache on open if no larger than this (cache mode "full")
 	UsedIsSize         bool          `config:"vfs_used_is_size"`     // if true, use the `rclone size` algorithm for Used size
 	FastFingerprint    bool          `config:"vfs_fast_fingerprint"` // if set use fast fingerprints
 	DiskSpaceTotalSize fs.SizeSuffix `config:"vfs_disk_space_total_size"`
