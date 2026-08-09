@@ -69,6 +69,8 @@ type Item struct {
 	pendingAccesses int                      // number of threads - cache reset not allowed if not zero
 	modified        bool                     // set if the file has been modified since the last Open
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
+	prefetchRead    int64                    // bytes read by readers since the file was opened, drives whole-file prefetch
+	prefetching     bool                     // set once whole-file prefetch has been started for this open
 }
 
 // Info is persisted to backing store
@@ -569,46 +571,13 @@ func (item *Item) open(o fs.Object) (err error) {
 	// Create the downloaders
 	if item.o != nil {
 		item.downloaders = downloaders.New(item, item.c.opt, item.name, item.o)
-
-		// If whole-file prefetch is enabled and this is a small file
-		// opened in cache-mode full, kick off a background download of
-		// the entire file. This avoids range-request thrashing (and the
-		// resulting high iowait / stalls) when a reader performs lots of
-		// random seeks within the file, e.g. reading pages out of a
-		// zip/cbz comic archive over the mount.
-		prefetchMax := int64(item.c.opt.CachePrefetchMax)
-		if prefetchMax > 0 && item.c.opt.CacheMode >= vfscommon.CacheModeFull &&
-			item.info.Size > 0 && item.info.Size <= prefetchMax && !item._present() {
-			size := item.info.Size
-			dls := item.downloaders
-			name := item.name
-			go func() {
-				fs.Debugf(name, "vfs cache: prefetching whole file into cache (%d bytes)", size)
-				// Download (not just EnsureDownloader) registers a
-				// waiter for the requested range, which extends the
-				// downloader's maxOffset so it keeps fetching
-				// sequentially instead of pausing once it gets ahead of
-				// the reader. Download can return before the whole range
-				// is actually present (e.g. a downloader stopped early or
-				// the waiter range got clipped), so loop over whatever is
-				// still missing until the file is fully cached. Download
-				// blocks, hence the goroutine.
-				whole := ranges.Range{Pos: 0, Size: size}
-				for try := 0; try < 1000; try++ {
-					missing := item.FindMissing(whole)
-					if missing.IsEmpty() {
-						fs.Debugf(name, "vfs cache: whole-file prefetch complete (%d bytes)", size)
-						return
-					}
-					if err := dls.Download(missing); err != nil {
-						fs.Debugf(name, "vfs cache: whole-file prefetch failed at %+v: %v", missing, err)
-						return
-					}
-				}
-				fs.Debugf(name, "vfs cache: whole-file prefetch gave up after too many retries")
-			}()
-		}
 	}
+
+	// Whole-file prefetch is armed here but deliberately not started:
+	// it only fires once a reader has actually read
+	// --vfs-cache-prefetch-after bytes, see _maybeStartPrefetch.
+	item.prefetchRead = 0
+	item.prefetching = false
 
 	return err
 }
@@ -1310,6 +1279,170 @@ func (item *Item) ReadAt(b []byte, off int64) (n int, err error) {
 	return n, err
 }
 
+// Whole-file prefetch is limited to a few files at a time. A file
+// manager listing a directory can put dozens of files into use at
+// once and unlimited prefetchers would just fight each other for
+// bandwidth.
+const prefetchParallel = 2
+
+var prefetchTokens = make(chan struct{}, prefetchParallel)
+
+const (
+	// Fetch this much per round rather than asking for all of the rest
+	// of the file at once, so that a reader wanting a different part of
+	// the file, or the cache cleaner, doesn't have to wait for the whole
+	// remainder to arrive.
+	prefetchStep = 32 * 1024 * 1024
+	// How often to check on a download in progress
+	prefetchPoll = time.Second
+	// Give up on a download which has cached nothing for this long
+	prefetchStallTime = 60 * time.Second
+)
+
+// errPrefetchStop is returned internally when a prefetch should stop
+// because the file is no longer worth prefetching
+var errPrefetchStop = errors.New("file no longer prefetchable")
+
+// _maybeStartPrefetch starts a whole-file prefetch if this open now
+// qualifies for one.
+//
+// Prefetch is driven by bytes actually read rather than by open()
+// because opens are cheap and frequent: thumbnailers and media probes
+// open a file, read a header and close it straight away, while moves,
+// renames and deletes never read at all. Only a reader which has got
+// through --vfs-cache-prefetch-after bytes counts as real use.
+//
+// call with the item lock held
+func (item *Item) _maybeStartPrefetch() {
+	prefetchMax := int64(item.c.opt.CachePrefetchMax)
+	if prefetchMax <= 0 || item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
+		return
+	}
+	if item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
+		return
+	}
+	if item.downloaders == nil || item.o == nil || item.info.Dirty {
+		return
+	}
+	if item.info.Size <= 0 || item.info.Size > prefetchMax || item._present() {
+		return
+	}
+	// Limit how many files prefetch at once. If we are at the limit
+	// leave this one disarmed so a later read can start it instead.
+	select {
+	case prefetchTokens <- struct{}{}:
+	default:
+		return
+	}
+	item.prefetching = true
+	// Hold the item open for the duration of the prefetch. The reader
+	// which triggered it will usually close long before the file is
+	// cached - media servers and file managers reopen the same file for
+	// every range they want - and the last close takes the downloaders
+	// and the cache file away.
+	item.opens++
+	go item.prefetchWholeFile(item.downloaders, item.info.Size, item.name)
+}
+
+// prefetchWholeFile downloads all of this item into the cache in the
+// background so that later reads - in particular random seeks around
+// the file, e.g. pages out of a zip/cbz comic archive - are served
+// from disk instead of turning into range requests.
+func (item *Item) prefetchWholeFile(dls *downloaders.Downloaders, size int64, name string) {
+	defer func() { <-prefetchTokens }()
+	// Release the open reference taken by _maybeStartPrefetch
+	defer func() {
+		if err := item.Close(nil); err != nil {
+			fs.Debugf(name, "vfs cache: whole-file prefetch failed to close item: %v", err)
+		}
+	}()
+
+	fs.Debugf(name, "vfs cache: prefetching whole file into cache (%d bytes)", size)
+	whole := ranges.Range{Pos: 0, Size: size}
+	prevPos := int64(-1)
+	for {
+		if stale, _ := item.prefetchStale(dls, size); stale {
+			fs.Debugf(name, "vfs cache: whole-file prefetch stopped, %v", errPrefetchStop)
+			return
+		}
+
+		missing := item.FindMissing(whole)
+		if missing.IsEmpty() {
+			fs.Debugf(name, "vfs cache: whole-file prefetch complete (%d bytes)", size)
+			return
+		}
+		// The gap being filled has to move forwards every round.
+		// Download reports success even when its downloader was stopped
+		// before writing anything, and a cache reset drops everything
+		// downloaded so far - either way re-requesting the same range
+		// would loop for ever.
+		if missing.Pos <= prevPos {
+			fs.Debugf(name, "vfs cache: whole-file prefetch stopped, no progress at %+v", missing)
+			return
+		}
+		prevPos = missing.Pos
+
+		step := missing
+		if step.Size > prefetchStep {
+			step.Size = prefetchStep
+		}
+		if err := item.prefetchDownload(dls, step, size); err != nil {
+			fs.Debugf(name, "vfs cache: whole-file prefetch stopped at %+v: %v", step, err)
+			return
+		}
+	}
+}
+
+// prefetchStale reports whether this item has stopped being a
+// candidate for the prefetch which started on dls when it was size
+// bytes long - it has been renamed, deleted, reset, reopened onto
+// different downloaders, or written to. It also returns how much of
+// the file is currently cached.
+func (item *Item) prefetchStale(dls *downloaders.Downloaders, size int64) (stale bool, cached int64) {
+	item.mu.Lock()
+	defer item.mu.Unlock()
+	stale = item.downloaders != dls || item.info.Dirty || item.beingReset || item.info.Size != size
+	return stale, item.info.Rs.Size()
+}
+
+// prefetchDownload waits for r to be downloaded, giving up if the item
+// stops being prefetchable or if nothing at all lands in the cache for
+// prefetchStallTime.
+//
+// Download only returns once its range is in the cache or the
+// downloaders are closed, which for a prefetch holding the item open
+// would be never. The abandoned goroutine is released when the last
+// open goes and the downloaders are shut down.
+func (item *Item) prefetchDownload(dls *downloaders.Downloaders, r ranges.Range, size int64) error {
+	errChan := make(chan error, 1)
+	go func() {
+		errChan <- dls.Download(r)
+	}()
+	ticker := time.NewTicker(prefetchPoll)
+	defer ticker.Stop()
+	lastCached := int64(-1)
+	stalled := time.Duration(0)
+	for {
+		select {
+		case err := <-errChan:
+			return err
+		case <-ticker.C:
+			stale, cached := item.prefetchStale(dls, size)
+			if stale {
+				return errPrefetchStop
+			}
+			if cached != lastCached {
+				lastCached, stalled = cached, 0
+				continue
+			}
+			stalled += prefetchPoll
+			if stalled >= prefetchStallTime {
+				return fmt.Errorf("stalled for %v with %d/%d bytes cached", stalled, cached, size)
+			}
+		}
+	}
+}
+
 // ReadAt bytes from the file at off
 func (item *Item) readAt(b []byte, off int64) (n int, err error) {
 	item.mu.Lock()
@@ -1340,6 +1473,10 @@ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
 	item.info.ATime = time.Now()
 	// Do the reading with Item.mu unlocked and cache protected by preAccess
 	n, err = item.fd.ReadAt(b, off)
+	if n > 0 {
+		item.prefetchRead += int64(n)
+		item._maybeStartPrefetch()
+	}
 	return n, err
 }
 

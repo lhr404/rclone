@@ -138,7 +138,12 @@ var OptionsInfo = fs.Options{{
 }, {
 	Name:    "vfs_cache_prefetch_max",
 	Default: 0 * fs.Mebi,
-	Help:    "In cache-mode full, when a file no larger than this is opened, prefetch the whole file into the cache in the background (0 to disable)",
+	Help:    "In cache-mode full, prefetch the whole file into the cache in the background once a file no larger than this is actually being read (0 to disable)",
+	Groups:  "VFS",
+}, {
+	Name:    "vfs_cache_prefetch_after",
+	Default: 4 * fs.Mebi,
+	Help:    "Only start whole-file prefetch after a reader has read this many bytes, so metadata-only opens (thumbnailers, media probes) don't trigger it",
 	Groups:  "VFS",
 }, {
 	Name:    "vfs_used_is_size",
@@ -207,13 +212,14 @@ type Options struct {
 	CachePollInterval  fs.Duration   `config:"vfs_cache_poll_interval"`
 	CaseInsensitive    bool          `config:"vfs_case_insensitive"`
 	BlockNormDupes     bool          `config:"vfs_block_norm_dupes"`
-	WriteWait          fs.Duration   `config:"vfs_write_wait"`       // time to wait for in-sequence write
-	ReadWait           fs.Duration   `config:"vfs_read_wait"`        // time to wait for in-sequence read
-	WriteBack          fs.Duration   `config:"vfs_write_back"`       // time to wait before writing back dirty files
+	WriteWait          fs.Duration   `config:"vfs_write_wait"`           // time to wait for in-sequence write
+	ReadWait           fs.Duration   `config:"vfs_read_wait"`            // time to wait for in-sequence read
+	WriteBack          fs.Duration   `config:"vfs_write_back"`           // time to wait before writing back dirty files
 	ReadAhead          fs.SizeSuffix `config:"vfs_read_ahead"`           // bytes to read ahead in cache mode "full"
-	CachePrefetchMax   fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // prefetch whole file into cache on open if no larger than this (cache mode "full")
-	UsedIsSize         bool          `config:"vfs_used_is_size"`     // if true, use the `rclone size` algorithm for Used size
-	FastFingerprint    bool          `config:"vfs_fast_fingerprint"` // if set use fast fingerprints
+	CachePrefetchMax   fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // prefetch whole file into cache once being read if no larger than this (cache mode "full")
+	CachePrefetchAfter fs.SizeSuffix `config:"vfs_cache_prefetch_after"` // only prefetch after a reader has read this many bytes
+	UsedIsSize         bool          `config:"vfs_used_is_size"`         // if true, use the `rclone size` algorithm for Used size
+	FastFingerprint    bool          `config:"vfs_fast_fingerprint"`     // if set use fast fingerprints
 	DiskSpaceTotalSize fs.SizeSuffix `config:"vfs_disk_space_total_size"`
 	MetadataExtension  string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
 }
