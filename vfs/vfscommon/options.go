@@ -136,19 +136,19 @@ var OptionsInfo = fs.Options{{
 	Help:    "Extra read ahead over --buffer-size when using cache-mode full",
 	Groups:  "VFS",
 }, {
-	Name:    "vfs_cache_prefetch_max",
-	Default: 0 * fs.Mebi,
-	Help:    "In cache-mode full, prefetch the whole file into the cache in the background once a file no larger than this is actually being read (0 to disable)",
+	Name:    "vfs_cache_prefetch_after_time",
+	Default: fs.Duration(0),
+	Help:    "In cache-mode full, prefetch the whole file into the cache in the background once readers have been reading it for this long (0 to disable)",
 	Groups:  "VFS",
 }, {
 	Name:    "vfs_cache_prefetch_after",
 	Default: 4 * fs.Mebi,
-	Help:    "Only start whole-file prefetch after a reader has read this many bytes, so metadata-only opens (thumbnailers, media probes) don't trigger it",
+	Help:    "Also require a reader to have read this many bytes before prefetching the file",
 	Groups:  "VFS",
 }, {
-	Name:    "vfs_cache_prefetch_after_percent",
-	Default: 25,
-	Help:    "Also require a reader to have read this percentage of the file before prefetching it, since a thumbnailer reads roughly the same few MB whatever the file size (0 to disable)",
+	Name:    "vfs_cache_prefetch_max",
+	Default: 0 * fs.Mebi,
+	Help:    "Don't prefetch files bigger than this (0 for no limit)",
 	Groups:  "VFS",
 }, {
 	Name:    "vfs_used_is_size",
@@ -193,42 +193,42 @@ func init() {
 
 // Options is options for creating the vfs
 type Options struct {
-	NoSeek             bool          `config:"no_seek"`        // don't allow seeking if set
-	NoChecksum         bool          `config:"no_checksum"`    // don't check checksums if set
-	ReadOnly           bool          `config:"read_only"`      // if set VFS is read only
-	Links              bool          `config:"vfs_links"`      // if set interpret link files
-	NoModTime          bool          `config:"no_modtime"`     // don't read mod times for files
-	DirCacheTime       fs.Duration   `config:"dir_cache_time"` // how long to consider directory listing cache valid
-	Refresh            bool          `config:"vfs_refresh"`    // refreshes the directory listing recursively on start
-	PollInterval       fs.Duration   `config:"poll_interval"`
-	Umask              FileMode      `config:"umask"`
-	UID                uint32        `config:"uid"`
-	GID                uint32        `config:"gid"`
-	DirPerms           FileMode      `config:"dir_perms"`
-	FilePerms          FileMode      `config:"file_perms"`
-	LinkPerms          FileMode      `config:"link_perms"`
-	ChunkSize          fs.SizeSuffix `config:"vfs_read_chunk_size"`       // if > 0 read files in chunks
-	ChunkSizeLimit     fs.SizeSuffix `config:"vfs_read_chunk_size_limit"` // if > ChunkSize double the chunk size after each chunk until reached
-	ChunkStreams       int           `config:"vfs_read_chunk_streams"`    // Number of download streams to use
-	CacheMode          CacheMode     `config:"vfs_cache_mode"`
-	CacheMaxAge        fs.Duration   `config:"vfs_cache_max_age"`
-	CacheMaxSize       fs.SizeSuffix `config:"vfs_cache_max_size"`
-	CacheMinFreeSpace  fs.SizeSuffix `config:"vfs_cache_min_free_space"`
-	CachePollInterval  fs.Duration   `config:"vfs_cache_poll_interval"`
-	CaseInsensitive    bool          `config:"vfs_case_insensitive"`
-	BlockNormDupes     bool          `config:"vfs_block_norm_dupes"`
-	WriteWait          fs.Duration   `config:"vfs_write_wait"`           // time to wait for in-sequence write
-	ReadWait           fs.Duration   `config:"vfs_read_wait"`            // time to wait for in-sequence read
-	WriteBack          fs.Duration   `config:"vfs_write_back"`           // time to wait before writing back dirty files
-	ReadAhead          fs.SizeSuffix `config:"vfs_read_ahead"`           // bytes to read ahead in cache mode "full"
-	CachePrefetchMax   fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // prefetch whole file into cache once being read if no larger than this (cache mode "full")
-	CachePrefetchAfter fs.SizeSuffix `config:"vfs_cache_prefetch_after"` // only prefetch after a reader has read this many bytes
-	// only prefetch after a reader has read this percentage of the file
-	CachePrefetchAfterPercent int           `config:"vfs_cache_prefetch_after_percent"`
-	UsedIsSize                bool          `config:"vfs_used_is_size"`     // if true, use the `rclone size` algorithm for Used size
-	FastFingerprint           bool          `config:"vfs_fast_fingerprint"` // if set use fast fingerprints
-	DiskSpaceTotalSize        fs.SizeSuffix `config:"vfs_disk_space_total_size"`
-	MetadataExtension         string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
+	NoSeek            bool          `config:"no_seek"`        // don't allow seeking if set
+	NoChecksum        bool          `config:"no_checksum"`    // don't check checksums if set
+	ReadOnly          bool          `config:"read_only"`      // if set VFS is read only
+	Links             bool          `config:"vfs_links"`      // if set interpret link files
+	NoModTime         bool          `config:"no_modtime"`     // don't read mod times for files
+	DirCacheTime      fs.Duration   `config:"dir_cache_time"` // how long to consider directory listing cache valid
+	Refresh           bool          `config:"vfs_refresh"`    // refreshes the directory listing recursively on start
+	PollInterval      fs.Duration   `config:"poll_interval"`
+	Umask             FileMode      `config:"umask"`
+	UID               uint32        `config:"uid"`
+	GID               uint32        `config:"gid"`
+	DirPerms          FileMode      `config:"dir_perms"`
+	FilePerms         FileMode      `config:"file_perms"`
+	LinkPerms         FileMode      `config:"link_perms"`
+	ChunkSize         fs.SizeSuffix `config:"vfs_read_chunk_size"`       // if > 0 read files in chunks
+	ChunkSizeLimit    fs.SizeSuffix `config:"vfs_read_chunk_size_limit"` // if > ChunkSize double the chunk size after each chunk until reached
+	ChunkStreams      int           `config:"vfs_read_chunk_streams"`    // Number of download streams to use
+	CacheMode         CacheMode     `config:"vfs_cache_mode"`
+	CacheMaxAge       fs.Duration   `config:"vfs_cache_max_age"`
+	CacheMaxSize      fs.SizeSuffix `config:"vfs_cache_max_size"`
+	CacheMinFreeSpace fs.SizeSuffix `config:"vfs_cache_min_free_space"`
+	CachePollInterval fs.Duration   `config:"vfs_cache_poll_interval"`
+	CaseInsensitive   bool          `config:"vfs_case_insensitive"`
+	BlockNormDupes    bool          `config:"vfs_block_norm_dupes"`
+	WriteWait         fs.Duration   `config:"vfs_write_wait"` // time to wait for in-sequence write
+	ReadWait          fs.Duration   `config:"vfs_read_wait"`  // time to wait for in-sequence read
+	WriteBack         fs.Duration   `config:"vfs_write_back"` // time to wait before writing back dirty files
+	ReadAhead         fs.SizeSuffix `config:"vfs_read_ahead"` // bytes to read ahead in cache mode "full"
+	// prefetch the whole file into the cache once readers have been reading it this long (cache mode "full")
+	CachePrefetchAfterTime fs.Duration   `config:"vfs_cache_prefetch_after_time"`
+	CachePrefetchAfter     fs.SizeSuffix `config:"vfs_cache_prefetch_after"` // also require a reader to have read this many bytes
+	CachePrefetchMax       fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // don't prefetch files bigger than this
+	UsedIsSize             bool          `config:"vfs_used_is_size"`         // if true, use the `rclone size` algorithm for Used size
+	FastFingerprint        bool          `config:"vfs_fast_fingerprint"`     // if set use fast fingerprints
+	DiskSpaceTotalSize     fs.SizeSuffix `config:"vfs_disk_space_total_size"`
+	MetadataExtension      string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
 }
 
 // Opt is the default options modified by the environment variables and command line flags

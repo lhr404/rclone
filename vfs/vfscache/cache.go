@@ -746,6 +746,49 @@ func (c *Cache) quotasOK() bool {
 	return c.maxSizeQuotaOK() && c.minFreeSpaceQuotaOK()
 }
 
+// PrefetchFreeSpaceOK reports whether there is room on the disk to
+// download need more bytes into the cache.
+//
+// It deliberately looks at the disk only and takes no cache locks, so
+// that it can be called with an item locked.
+func (c *Cache) PrefetchFreeSpaceOK(need int64) bool {
+	if need <= 0 {
+		return true
+	}
+	du, err := diskusage.New(config.GetCacheDir())
+	if err != nil {
+		// Unsupported or broken - leave it to the cache cleaner
+		return true
+	}
+	if du.Available < uint64(need) {
+		return false
+	}
+	minFree := int64(c.opt.CacheMinFreeSpace)
+	if minFree < 0 {
+		minFree = 0
+	}
+	return du.Available-uint64(need) >= uint64(minFree)
+}
+
+// PrefetchSpaceOK reports whether downloading need more bytes into the
+// cache would stay inside the cache quotas.
+//
+// Unlike quotasOK this looks ahead by the amount about to be
+// downloaded, as a prefetch can ask for a lot more than a reader would
+// and the cache cleaner only catches up once a poll interval.
+func (c *Cache) PrefetchSpaceOK(need int64) bool {
+	if need < 0 {
+		need = 0
+	}
+	c.mu.Lock()
+	used := c.used
+	c.mu.Unlock()
+	if maxSize := int64(c.opt.CacheMaxSize); maxSize > 0 && used+need > maxSize {
+		return false
+	}
+	return c.PrefetchFreeSpaceOK(need)
+}
+
 // Return true if any quotas set
 func (c *Cache) haveQuotas() bool {
 	return c.opt.CacheMaxSize > 0 || c.opt.CacheMinFreeSpace > 0

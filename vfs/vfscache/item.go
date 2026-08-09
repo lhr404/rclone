@@ -70,6 +70,8 @@ type Item struct {
 	modified        bool                     // set if the file has been modified since the last Open
 	beingReset      bool                     // cache cleaner is resetting the cache file, access not allowed
 	prefetchRead    int64                    // bytes read by readers since the file was opened, drives whole-file prefetch
+	prefetchFor     time.Duration            // how long readers have been reading this file, drives whole-file prefetch
+	prefetchLast    time.Time                // when a reader last read from this file
 	prefetching     bool                     // set once whole-file prefetch has been started for this open
 }
 
@@ -574,9 +576,10 @@ func (item *Item) open(o fs.Object) (err error) {
 	}
 
 	// Whole-file prefetch is armed here but deliberately not started:
-	// it only fires once a reader has actually read
-	// --vfs-cache-prefetch-after bytes, see _maybeStartPrefetch.
-	item.prefetchRead = 0
+	// it only fires once readers have kept at this file for a while,
+	// see _maybeStartPrefetch. How much has been read is deliberately
+	// not reset here - a media server reopens a file for every range it
+	// wants, so per-open counts would never add up to anything.
 	item.prefetching = false
 
 	return err
@@ -1297,54 +1300,76 @@ const (
 	prefetchPoll = time.Second
 	// Give up on a download which has cached nothing for this long
 	prefetchStallTime = 60 * time.Second
+	// A gap between two reads longer than this ends the stretch of use
+	// they belong to rather than counting towards it
+	prefetchIdleGap = 2 * time.Minute
 )
 
 // errPrefetchStop is returned internally when a prefetch should stop
 // because the file is no longer worth prefetching
 var errPrefetchStop = errors.New("file no longer prefetchable")
 
-// _prefetchAfter returns how many bytes a reader has to get through
-// before this item is worth prefetching
+// _recordRead notes that a reader has just read n bytes, which is what
+// arms the whole-file prefetch.
+//
+// What is measured is one continuous stretch of use: a gap of more
+// than prefetchIdleGap between two reads starts the count again.
+// Otherwise a file which something glances at for a second a day would
+// eventually add up to a prefetch on its own.
 //
 // call with the item lock held
-func (item *Item) _prefetchAfter() int64 {
-	after := int64(item.c.opt.CachePrefetchAfter)
-	if percent := int64(item.c.opt.CachePrefetchAfterPercent); percent > 0 {
-		if byPercent := item.info.Size / 100 * percent; byPercent > after {
-			after = byPercent
-		}
+func (item *Item) _recordRead(n int) {
+	now := time.Now()
+	gap := prefetchIdleGap + 1
+	if !item.prefetchLast.IsZero() {
+		gap = now.Sub(item.prefetchLast)
 	}
-	return after
+	if gap > prefetchIdleGap {
+		item.prefetchFor = 0
+		item.prefetchRead = 0
+	} else {
+		item.prefetchFor += gap
+	}
+	item.prefetchLast = now
+	item.prefetchRead += int64(n)
 }
 
 // _maybeStartPrefetch starts a whole-file prefetch if this open now
 // qualifies for one.
 //
-// Prefetch is driven by bytes actually read rather than by open()
-// because opens are cheap and frequent: thumbnailers and media probes
-// open a file, read a header and close it straight away, while moves,
-// renames and deletes never read at all.
+// What we are trying to tell apart is a person using a file from a
+// program glancing at it. Neither the number of opens nor the number
+// of bytes read does that: opens are cheap and frequent, and a
+// thumbnailer or media probe reads roughly the same few MB whatever
+// the file is. How long the reading goes on for does: probes are over
+// in a second or two, while someone watching a video or reading a
+// comic keeps coming back to the same file for minutes.
 //
-// The threshold is both an absolute number of bytes and a percentage
-// of the file, because a thumbnailer reads roughly the same few MB
-// whatever the file size while a reader or a player works its way
-// through in proportion to it. An absolute threshold on its own pulls
-// in whole directories of videos as soon as something makes
-// thumbnails for them.
+// Moves, renames and deletes never read at all, so they can't trigger
+// this however long they take.
 //
 // call with the item lock held
 func (item *Item) _maybeStartPrefetch() {
-	prefetchMax := int64(item.c.opt.CachePrefetchMax)
-	if prefetchMax <= 0 || item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
+	prefetchAfterTime := time.Duration(item.c.opt.CachePrefetchAfterTime)
+	if prefetchAfterTime <= 0 || item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
 		return
 	}
 	if item.downloaders == nil || item.o == nil || item.info.Dirty {
 		return
 	}
-	if item.info.Size <= 0 || item.info.Size > prefetchMax || item._present() {
+	if item.info.Size <= 0 || item._present() {
 		return
 	}
-	if item.prefetchRead < item._prefetchAfter() {
+	if prefetchMax := int64(item.c.opt.CachePrefetchMax); prefetchMax > 0 && item.info.Size > prefetchMax {
+		return
+	}
+	if item.prefetchFor < prefetchAfterTime || item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
+		return
+	}
+	// Don't even arm a prefetch which clearly won't fit, or a disk
+	// which has run out would arm and abort one on every read. The
+	// prefetch itself rechecks this against the full quotas as it goes.
+	if !item.c.PrefetchFreeSpaceOK(item.info.Size - item.info.Rs.Size()) {
 		return
 	}
 	// Limit how many files prefetch at once. If we are at the limit
@@ -1381,7 +1406,8 @@ func (item *Item) prefetchWholeFile(dls *downloaders.Downloaders, size int64, na
 	whole := ranges.Range{Pos: 0, Size: size}
 	prevPos := int64(-1)
 	for {
-		if stale, _ := item.prefetchStale(dls, size); stale {
+		stale, cached := item.prefetchStale(dls, size)
+		if stale {
 			fs.Debugf(name, "vfs cache: whole-file prefetch stopped, %v", errPrefetchStop)
 			return
 		}
@@ -1389,6 +1415,15 @@ func (item *Item) prefetchWholeFile(dls *downloaders.Downloaders, size int64, na
 		missing := item.FindMissing(whole)
 		if missing.IsEmpty() {
 			fs.Debugf(name, "vfs cache: whole-file prefetch complete (%d bytes)", size)
+			return
+		}
+		// There is no size limit on what may be prefetched, so the
+		// cache quotas are what stops a big file filling the disk. Ask
+		// for the whole remainder rather than this round's step, so a
+		// file which can't fit is dropped now instead of being pulled
+		// in 32M at a time while the cleaner throws it away again.
+		if remaining := size - cached; !item.c.PrefetchSpaceOK(remaining) {
+			fs.Debugf(name, "vfs cache: whole-file prefetch stopped, no room in the cache for the remaining %d bytes", remaining)
 			return
 		}
 		// The gap being filled has to move forwards every round.
@@ -1494,7 +1529,7 @@ func (item *Item) readAt(b []byte, off int64) (n int, err error) {
 	// Do the reading with Item.mu unlocked and cache protected by preAccess
 	n, err = item.fd.ReadAt(b, off)
 	if n > 0 {
-		item.prefetchRead += int64(n)
+		item._recordRead(n)
 		item._maybeStartPrefetch()
 	}
 	return n, err
