@@ -1303,14 +1303,34 @@ const (
 // because the file is no longer worth prefetching
 var errPrefetchStop = errors.New("file no longer prefetchable")
 
+// _prefetchAfter returns how many bytes a reader has to get through
+// before this item is worth prefetching
+//
+// call with the item lock held
+func (item *Item) _prefetchAfter() int64 {
+	after := int64(item.c.opt.CachePrefetchAfter)
+	if percent := int64(item.c.opt.CachePrefetchAfterPercent); percent > 0 {
+		if byPercent := item.info.Size / 100 * percent; byPercent > after {
+			after = byPercent
+		}
+	}
+	return after
+}
+
 // _maybeStartPrefetch starts a whole-file prefetch if this open now
 // qualifies for one.
 //
 // Prefetch is driven by bytes actually read rather than by open()
 // because opens are cheap and frequent: thumbnailers and media probes
 // open a file, read a header and close it straight away, while moves,
-// renames and deletes never read at all. Only a reader which has got
-// through --vfs-cache-prefetch-after bytes counts as real use.
+// renames and deletes never read at all.
+//
+// The threshold is both an absolute number of bytes and a percentage
+// of the file, because a thumbnailer reads roughly the same few MB
+// whatever the file size while a reader or a player works its way
+// through in proportion to it. An absolute threshold on its own pulls
+// in whole directories of videos as soon as something makes
+// thumbnails for them.
 //
 // call with the item lock held
 func (item *Item) _maybeStartPrefetch() {
@@ -1318,13 +1338,13 @@ func (item *Item) _maybeStartPrefetch() {
 	if prefetchMax <= 0 || item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
 		return
 	}
-	if item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
-		return
-	}
 	if item.downloaders == nil || item.o == nil || item.info.Dirty {
 		return
 	}
 	if item.info.Size <= 0 || item.info.Size > prefetchMax || item._present() {
+		return
+	}
+	if item.prefetchRead < item._prefetchAfter() {
 		return
 	}
 	// Limit how many files prefetch at once. If we are at the limit

@@ -146,6 +146,11 @@ var OptionsInfo = fs.Options{{
 	Help:    "Only start whole-file prefetch after a reader has read this many bytes, so metadata-only opens (thumbnailers, media probes) don't trigger it",
 	Groups:  "VFS",
 }, {
+	Name:    "vfs_cache_prefetch_after_percent",
+	Default: 25,
+	Help:    "Also require a reader to have read this percentage of the file before prefetching it, since a thumbnailer reads roughly the same few MB whatever the file size (0 to disable)",
+	Groups:  "VFS",
+}, {
 	Name:    "vfs_used_is_size",
 	Default: false,
 	Help:    "Use the `rclone size` algorithm for Used size",
@@ -218,10 +223,12 @@ type Options struct {
 	ReadAhead          fs.SizeSuffix `config:"vfs_read_ahead"`           // bytes to read ahead in cache mode "full"
 	CachePrefetchMax   fs.SizeSuffix `config:"vfs_cache_prefetch_max"`   // prefetch whole file into cache once being read if no larger than this (cache mode "full")
 	CachePrefetchAfter fs.SizeSuffix `config:"vfs_cache_prefetch_after"` // only prefetch after a reader has read this many bytes
-	UsedIsSize         bool          `config:"vfs_used_is_size"`         // if true, use the `rclone size` algorithm for Used size
-	FastFingerprint    bool          `config:"vfs_fast_fingerprint"`     // if set use fast fingerprints
-	DiskSpaceTotalSize fs.SizeSuffix `config:"vfs_disk_space_total_size"`
-	MetadataExtension  string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
+	// only prefetch after a reader has read this percentage of the file
+	CachePrefetchAfterPercent int           `config:"vfs_cache_prefetch_after_percent"`
+	UsedIsSize                bool          `config:"vfs_used_is_size"`     // if true, use the `rclone size` algorithm for Used size
+	FastFingerprint           bool          `config:"vfs_fast_fingerprint"` // if set use fast fingerprints
+	DiskSpaceTotalSize        fs.SizeSuffix `config:"vfs_disk_space_total_size"`
+	MetadataExtension         string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
 }
 
 // Opt is the default options modified by the environment variables and command line flags
