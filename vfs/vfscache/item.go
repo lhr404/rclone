@@ -1300,6 +1300,11 @@ const (
 	prefetchPoll = time.Second
 	// Give up on a download which has cached nothing for this long
 	prefetchStallTime = 60 * time.Second
+	// Only a gap between two reads shorter than this counts towards how
+	// long the file has been read for. A longer one is a pause rather
+	// than reading, so something which touches the same file every so
+	// often can't add its pauses up into a prefetch.
+	prefetchActiveGap = 10 * time.Second
 	// A gap between two reads longer than this ends the stretch of use
 	// they belong to rather than counting towards it
 	prefetchIdleGap = 2 * time.Minute
@@ -1312,10 +1317,15 @@ var errPrefetchStop = errors.New("file no longer prefetchable")
 // _recordRead notes that a reader has just read n bytes, which is what
 // arms the whole-file prefetch.
 //
-// What is measured is one continuous stretch of use: a gap of more
-// than prefetchIdleGap between two reads starts the count again.
-// Otherwise a file which something glances at for a second a day would
-// eventually add up to a prefetch on its own.
+// What is measured is time spent reading, not time elapsed since the
+// file was first touched: only a gap shorter than prefetchActiveGap
+// counts towards the total. A program which reads a bit of a file,
+// goes away and comes back a minute later has not been reading it for
+// a minute, and must not be treated as though it had.
+//
+// A gap of more than prefetchIdleGap starts the count again, so that a
+// file something glances at for a second a day doesn't eventually add
+// up to a prefetch on its own.
 //
 // call with the item lock held
 func (item *Item) _recordRead(n int) {
@@ -1324,10 +1334,11 @@ func (item *Item) _recordRead(n int) {
 	if !item.prefetchLast.IsZero() {
 		gap = now.Sub(item.prefetchLast)
 	}
-	if gap > prefetchIdleGap {
+	switch {
+	case gap > prefetchIdleGap:
 		item.prefetchFor = 0
 		item.prefetchRead = 0
-	} else {
+	case gap <= prefetchActiveGap:
 		item.prefetchFor += gap
 	}
 	item.prefetchLast = now
