@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
+	"strings"
 	"sync"
 	"time"
 
@@ -1345,6 +1347,35 @@ func (item *Item) _recordRead(n int) {
 	item.prefetchRead += int64(n)
 }
 
+// _prefetchImmediate reports whether this item's file extension is in
+// the --vfs-cache-prefetch-immediate-ext list, which makes the whole
+// file eligible for prefetch without waiting out the read-duration gate.
+//
+// call with the item lock held
+func (item *Item) _prefetchImmediate() bool {
+	list := item.c.opt.CachePrefetchImmediateExt
+	if list == "" {
+		return false
+	}
+	ext := strings.ToLower(strings.TrimPrefix(path.Ext(item.name), "."))
+	if ext == "" {
+		return false
+	}
+	for len(list) > 0 {
+		var part string
+		if i := strings.IndexByte(list, ','); i >= 0 {
+			part, list = list[:i], list[i+1:]
+		} else {
+			part, list = list, ""
+		}
+		part = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(part)), ".")
+		if part != "" && part == ext {
+			return true
+		}
+	}
+	return false
+}
+
 // _maybeStartPrefetch starts a whole-file prefetch if this open now
 // qualifies for one.
 //
@@ -1362,7 +1393,15 @@ func (item *Item) _recordRead(n int) {
 // call with the item lock held
 func (item *Item) _maybeStartPrefetch() {
 	prefetchAfterTime := time.Duration(item.c.opt.CachePrefetchAfterTime)
-	if prefetchAfterTime <= 0 || item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
+	// Archive types (comic books, zips) are worth prefetching whole as
+	// soon as they are opened for reading, so they skip the read-duration
+	// gate. This works even when the time-based prefetch is disabled
+	// (prefetchAfterTime <= 0).
+	immediate := item._prefetchImmediate()
+	if item.prefetching || item.c.opt.CacheMode < vfscommon.CacheModeFull {
+		return
+	}
+	if prefetchAfterTime <= 0 && !immediate {
 		return
 	}
 	if item.downloaders == nil || item.o == nil || item.info.Dirty {
@@ -1374,7 +1413,13 @@ func (item *Item) _maybeStartPrefetch() {
 	if prefetchMax := int64(item.c.opt.CachePrefetchMax); prefetchMax > 0 && item.info.Size > prefetchMax {
 		return
 	}
-	if item.prefetchFor < prefetchAfterTime || item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
+	// Immediate-prefetch archives skip the read-duration gate but still
+	// require the minimum bytes read, so a metadata probe won't trigger a
+	// whole-file prefetch.
+	if !immediate && item.prefetchFor < prefetchAfterTime {
+		return
+	}
+	if item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
 		return
 	}
 	// Don't even arm a prefetch which clearly won't fit, or a disk
