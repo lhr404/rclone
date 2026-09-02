@@ -1414,12 +1414,17 @@ func (item *Item) _maybeStartPrefetch() {
 		return
 	}
 	// Immediate-prefetch archives skip the read-duration gate but still
-	// require the minimum bytes read, so a metadata probe won't trigger a
-	// whole-file prefetch.
-	if !immediate && item.prefetchFor < prefetchAfterTime {
+	// require a minimum bytes read, so a metadata probe won't trigger a
+	// whole-file prefetch. They use their own (smaller) bytes gate so the
+	// large --vfs-cache-prefetch-after used for the time-based prefetch
+	// doesn't stop typical archives from ever qualifying.
+	prefetchAfter := int64(item.c.opt.CachePrefetchAfter)
+	if immediate {
+		prefetchAfter = int64(item.c.opt.CachePrefetchImmediateAfter)
+	} else if item.prefetchFor < prefetchAfterTime {
 		return
 	}
-	if item.prefetchRead < int64(item.c.opt.CachePrefetchAfter) {
+	if item.prefetchRead < prefetchAfter {
 		return
 	}
 	// Don't even arm a prefetch which clearly won't fit, or a disk

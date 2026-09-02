@@ -153,7 +153,12 @@ var OptionsInfo = fs.Options{{
 }, {
 	Name:    "vfs_cache_prefetch_immediate_ext",
 	Default: "cbz,cbr,cb7,cbt,zip,rar,7z",
-	Help:    "In cache-mode full, prefetch whole files with these extensions immediately (comma separated, e.g. cbz,zip), skipping the --vfs-cache-prefetch-after-time wait but still honouring --vfs-cache-prefetch-after",
+	Help:    "In cache-mode full, prefetch whole files with these extensions immediately (comma separated, e.g. cbz,zip), skipping the --vfs-cache-prefetch-after-time wait",
+	Groups:  "VFS",
+}, {
+	Name:    "vfs_cache_prefetch_immediate_after",
+	Default: 1 * fs.Mebi,
+	Help:    "For --vfs-cache-prefetch-immediate-ext files, require a reader to have read this many bytes before prefetching, instead of --vfs-cache-prefetch-after (0 to prefetch on first read)",
 	Groups:  "VFS",
 }, {
 	Name:    "vfs_used_is_size",
@@ -227,14 +232,15 @@ type Options struct {
 	WriteBack         fs.Duration   `config:"vfs_write_back"` // time to wait before writing back dirty files
 	ReadAhead         fs.SizeSuffix `config:"vfs_read_ahead"` // bytes to read ahead in cache mode "full"
 	// prefetch the whole file into the cache once readers have been reading it this long (cache mode "full")
-	CachePrefetchAfterTime    fs.Duration   `config:"vfs_cache_prefetch_after_time"`
-	CachePrefetchAfter        fs.SizeSuffix `config:"vfs_cache_prefetch_after"`         // also require a reader to have read this many bytes
-	CachePrefetchMax          fs.SizeSuffix `config:"vfs_cache_prefetch_max"`           // don't prefetch files bigger than this
-	CachePrefetchImmediateExt string        `config:"vfs_cache_prefetch_immediate_ext"` // extensions to prefetch immediately, skipping the read-duration wait
-	UsedIsSize                bool          `config:"vfs_used_is_size"`                 // if true, use the `rclone size` algorithm for Used size
-	FastFingerprint           bool          `config:"vfs_fast_fingerprint"`             // if set use fast fingerprints
-	DiskSpaceTotalSize        fs.SizeSuffix `config:"vfs_disk_space_total_size"`
-	MetadataExtension         string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
+	CachePrefetchAfterTime      fs.Duration   `config:"vfs_cache_prefetch_after_time"`
+	CachePrefetchAfter          fs.SizeSuffix `config:"vfs_cache_prefetch_after"`           // also require a reader to have read this many bytes
+	CachePrefetchMax            fs.SizeSuffix `config:"vfs_cache_prefetch_max"`             // don't prefetch files bigger than this
+	CachePrefetchImmediateExt   string        `config:"vfs_cache_prefetch_immediate_ext"`   // extensions to prefetch immediately, skipping the read-duration wait
+	CachePrefetchImmediateAfter fs.SizeSuffix `config:"vfs_cache_prefetch_immediate_after"` // bytes read gate for immediate-prefetch extensions
+	UsedIsSize                  bool          `config:"vfs_used_is_size"`                   // if true, use the `rclone size` algorithm for Used size
+	FastFingerprint             bool          `config:"vfs_fast_fingerprint"`               // if set use fast fingerprints
+	DiskSpaceTotalSize          fs.SizeSuffix `config:"vfs_disk_space_total_size"`
+	MetadataExtension           string        `config:"vfs_metadata_extension"` // if set respond to files with this extension with metadata
 }
 
 // Opt is the default options modified by the environment variables and command line flags
